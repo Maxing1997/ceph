@@ -504,6 +504,7 @@ private:
   const RBD& operator=(const RBD& rhs);
 };
 
+// Image 参数设置
 class CEPH_RBD_API ImageOptions {
 public:
   ImageOptions();
@@ -527,6 +528,7 @@ private:
   rbd_image_options_t opts;
 };
 
+// 存储池 Pool 状态
 class CEPH_RBD_API PoolStats {
 public:
   PoolStats();
@@ -572,6 +574,7 @@ public:
   Image();
   ~Image();
 
+  // 镜像的读写，flatten，trim等操作
   // non-copyable
   Image(const Image& rhs) = delete;
   Image& operator=(const Image& rhs) = delete;

@@ -687,21 +687,28 @@ namespace librbd {
     return 0;
   }
 
+  // 异步通过ID打开只读RBD镜像的核心实现
   int RBD::aio_open_by_id_read_only(IoCtx& io_ctx, Image& image, const char *id,
 	                            const char *snap_name, RBD::AioCompletion *c)
   {
+    // 创建镜像上下文对象（以ID方式构造，read-only模式）
     ImageCtx *ictx = new ImageCtx("", id, snap_name, io_ctx, true);
+    // 初始化跟踪点（用于LTTng性能分析）
     TracepointProvider::initialize<tracepoint_traits>(get_cct(io_ctx));
     tracepoint(librbd, aio_open_image_by_id_enter, ictx, ictx->id.c_str(),
                ictx->snap_name.c_str(), ictx->read_only, c->pc);
 
+    // 异步操作的核心逻辑：
     if (image.ctx != nullptr) {
+      // 如果已有打开的镜像上下文，先异步关闭旧镜像
       reinterpret_cast<ImageCtx*>(image.ctx)->state->close(
 	new C_OpenAfterCloseComplete(ictx, get_aio_completion(c), &image.ctx));
     } else {
+      // 直接异步打开新镜像
       ictx->state->open(0, new C_OpenComplete(ictx, get_aio_completion(c),
                                               &image.ctx));
     }
+    // 记录跟踪点并立即返回（实际结果通过AioCompletion回调）
     tracepoint(librbd, aio_open_image_by_id_exit, 0);
     return 0;
   }
@@ -1056,11 +1063,16 @@ namespace librbd {
 
   int RBD::migration_commit(IoCtx& io_ctx, const char *image_name)
   {
+    // 初始化跟踪点（用于LTTng性能分析）
     TracepointProvider::initialize<tracepoint_traits>(get_cct(io_ctx));
+    // 记录存储池名称， 存储池ID， 镜像名称
     tracepoint(librbd, migration_commit_enter, io_ctx.get_pool_name().c_str(),
                io_ctx.get_id(), image_name);
+    // 创建空进度上下文（不关注进度更新）
     librbd::NoOpProgressContext prog_ctx;
+    // 调用底层迁移提交接口
     int r = librbd::api::Migration<>::commit(io_ctx, image_name, prog_ctx);
+    // 记录操作结果跟踪点
     tracepoint(librbd, migration_commit_exit, r);
     return r;
   }

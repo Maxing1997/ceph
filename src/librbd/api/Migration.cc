@@ -698,6 +698,7 @@ int Migration<I>::commit(librados::IoCtx& io_ctx,
 
   ldout(cct, 10) << io_ctx.get_pool_name() << "/" << image_name << dendl;
 
+  // 2. 打开关联的源/目标镜像
   I *src_image_ctx;
   I *dst_image_ctx;
   cls::rbd::MigrationSpec src_migration_spec;
@@ -708,6 +709,7 @@ int Migration<I>::commit(librados::IoCtx& io_ctx,
     return r;
   }
 
+  // 3. 状态验证
   if (dst_migration_spec.state != cls::rbd::MIGRATION_STATE_EXECUTED) {
     lderr(cct) << "current migration state is '" << dst_migration_spec.state
               << "' (should be 'executed')" << dendl;
@@ -719,6 +721,7 @@ int Migration<I>::commit(librados::IoCtx& io_ctx,
   }
 
   // ensure the destination loads the migration info
+  // 4. 强制刷新目标镜像状态
   dst_image_ctx->ignore_migrating = false;
   r = dst_image_ctx->state->refresh();
   if (r < 0) {
@@ -737,6 +740,7 @@ int Migration<I>::commit(librados::IoCtx& io_ctx,
   *_dout << " -> " << dst_image_ctx->md_ctx.get_pool_name() << "/"
          << dst_image_ctx->name << dendl;
 
+  // 5. 创建Migration对象执行核心操作
   ImageOptions opts;
   Migration migration(src_image_ctx, dst_image_ctx, dst_migration_spec,
                       opts, &prog_ctx);
@@ -1133,18 +1137,23 @@ template <typename I>
 int Migration<I>::commit() {
   ldout(m_cct, 10) << dendl;
 
+  // 2. 资源自动释放保障（RAII模式）
   BOOST_SCOPE_EXIT_TPL(&m_dst_image_ctx, &m_src_image_ctx) {
+    // 关闭目标镜像上下文
     m_dst_image_ctx->state->close();
+    // 关闭源镜像上下文（如果存在）
     if (m_src_image_ctx != nullptr) {
       m_src_image_ctx->state->close();
     }
   } BOOST_SCOPE_EXIT_END;
 
+  // 3. 核心操作：清理目标镜像迁移元数据
   int r = remove_migration(m_dst_image_ctx);
   if (r < 0) {
     return r;
   }
 
+  // 4. 原子删除源镜像（如果存在）
   if (m_src_image_ctx != nullptr) {
     r = remove_src_image(&m_src_image_ctx);
     if (r < 0) {
@@ -1152,6 +1161,7 @@ int Migration<I>::commit() {
     }
   }
 
+  // 5. 启用目标镜像的同步功能
   r = enable_mirroring(m_dst_image_ctx, m_mirroring, m_mirror_image_mode);
   if (r < 0) {
     return r;

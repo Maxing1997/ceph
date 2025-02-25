@@ -373,10 +373,13 @@ ImageReadRequest<I>::ImageReadRequest(I &image_ctx, AioCompletion *aio_comp,
 
 template <typename I>
 void ImageReadRequest<I>::send_request() {
+  // 1. 获取镜像上下文和配置
   I &image_ctx = this->m_image_ctx;
   CephContext *cct = image_ctx.cct;
 
+  // 2. 预读逻辑（当满足条件时）
   auto &image_extents = this->m_image_extents;
+  // 仅在数据区域,启用缓存, 配置预读, 非随机访问模式
   if (this->m_image_area == ImageArea::DATA &&
       image_ctx.cache && image_ctx.readahead_max_bytes > 0 &&
       !(m_op_flags & LIBRADOS_OP_FLAG_FADVISE_RANDOM)) {
@@ -384,31 +387,42 @@ void ImageReadRequest<I>::send_request() {
   }
 
   // map image extents to object extents
+  // 3. 将镜像范围转换为对象范围
   LightweightObjectExtents object_extents;
   uint64_t buffer_ofs = 0;
   for (auto &extent : image_extents) {
+    // 跳过空范围
     if (extent.second == 0) {
       continue;
     }
 
+  // 转换逻辑：镜像偏移 -> 对象编号和偏移
     util::area_to_object_extents(&image_ctx, extent.first, extent.second,
                                  this->m_image_area, buffer_ofs,
                                  &object_extents);
+    // 累计缓冲区偏移                            
     buffer_ofs += extent.second;
   }
 
+  // 4. 初始化异步完成对象
   AioCompletion *aio_comp = this->m_aio_comp;
+  // 记录原始镜像范围
   aio_comp->read_result.set_image_extents(image_extents);
 
   // issue the requests
+  // 5. 分发对象读取请求
+   // 设置总请求数
   aio_comp->set_request_count(object_extents.size());
   for (auto &oe : object_extents) {
+    // 日志记录对象访问详情
     ldout(cct, 20) << data_object_name(&image_ctx, oe.object_no) << " "
                    << oe.offset << "~" << oe.length << " from "
                    << oe.buffer_extents << dendl;
 
+    // 创建对象读取请求的完成回调
     auto req_comp = new io::ReadResult::C_ObjectReadRequest(
       aio_comp, {{oe.offset, oe.length, std::move(oe.buffer_extents)}});
+    // 创建并发送对象读取请求
     auto req = ObjectDispatchSpec::create_read(
       &image_ctx, OBJECT_DISPATCH_LAYER_NONE, oe.object_no,
       &req_comp->extents, m_io_context, m_op_flags, m_read_flags,
@@ -416,6 +430,7 @@ void ImageReadRequest<I>::send_request() {
     req->send();
   }
 
+  // 6. 更新性能计数器
   image_ctx.perfcounter->inc(l_librbd_rd);
   image_ctx.perfcounter->inc(l_librbd_rd_bytes, buffer_ofs);
 }
