@@ -2848,6 +2848,7 @@ namespace librbd {
       tracepoint(librbd, aio_write_exit, -EINVAL);
       return -EINVAL;
     }
+    // 4. 调用异步写核心逻
     api::Io<>::aio_write(*ictx, get_aio_completion(c), off, len, bufferlist{bl},
                          op_flags, true);
 

@@ -366,6 +366,8 @@ public:
 			 OpRequestRef op) override {
     osd->store->queue_transaction(ch, std::move(t), op);
   }
+
+  //最终调用到osd层
   void queue_transactions(std::vector<ObjectStore::Transaction>& tls,
 			  OpRequestRef op) override {
     osd->store->queue_transactions(ch, tls, op, NULL);

@@ -254,19 +254,23 @@ void Io<I>::aio_write(I &image_ctx, io::AioCompletion *aio_comp, uint64_t off,
     trace.event("init");
   }
 
+  // 2. 初始化异步完成对象
   aio_comp->init_time(util::get_image_ctx(&image_ctx), io::AIO_TYPE_WRITE);
   ldout(cct, 20) << "ictx=" << &image_ctx << ", "
                  << "completion=" << aio_comp << ", off=" << off << ", "
                  << "len=" << len << ", flags=" << op_flags << dendl;
 
+  // 3. 配置事件通知
   if (native_async && image_ctx.event_socket.is_valid()) {
     aio_comp->set_event_notify(true);
   }
 
+  // 4. 验证IO有效性
   if (!is_valid_io(image_ctx, aio_comp)) {
     return;
   }
 
+  // 5. 创建并发送写请求
   auto req = io::ImageDispatchSpec::create_write(
       image_ctx, io::IMAGE_DISPATCH_LAYER_API_START, aio_comp,
       {{off, len}}, io::ImageArea::DATA, std::move(bl), op_flags, trace);

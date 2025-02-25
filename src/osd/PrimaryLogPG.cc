@@ -1813,6 +1813,7 @@ void PrimaryLogPG::handle_backoff(OpRequestRef& op)
   session->ack_backoff(cct, m->pgid, m->id, begin, end);
 }
 
+//检查PG的状态，以及根据消息类型进行不同处理
 void PrimaryLogPG::do_request(
   OpRequestRef& op,
   ThreadPool::TPHandle &handle)
@@ -1824,6 +1825,7 @@ void PrimaryLogPG::do_request(
 
 
 // make sure we have a new enough map
+  //检查 osdmap
   auto p = waiting_for_map.find(op->get_source());
   if (p != waiting_for_map.end()) {
     // preserve ordering
@@ -1842,6 +1844,7 @@ void PrimaryLogPG::do_request(
     return;
   }
 
+  //是否可以丢弃
   if (can_discard_request(op)) {
     return;
   }
@@ -1883,13 +1886,17 @@ void PrimaryLogPG::do_request(
     }
   }
 
+  //PG还没有peered
   if (!is_peered()) {
     // Delay unless PGBackend says it's ok
+    //检查pgbackend是否可以处理这个请求
     if (pgbackend->can_handle_while_inactive(op)) {
+      //可以处理，则调用该函数处理
       bool handled = pgbackend->handle_message(op);
       ceph_assert(handled);
       return;
     } else {
+      //不可以则加入waiting_for_peered队列
       waiting_for_peered.push_back(op);
       op->mark_delayed("waiting for peered");
       return;
@@ -1903,13 +1910,16 @@ void PrimaryLogPG::do_request(
     return;
   }
 
+  //PG处于Peered 并且flushes_in_progress为0的状态下
   ceph_assert(is_peered() && !recovery_state.needs_flush());
   if (pgbackend->handle_message(op))
     return;
 
+  // 根据不同的消息请求类型，进行相应的处理
   switch (msg_type) {
   case CEPH_MSG_OSD_OP:
   case CEPH_MSG_OSD_BACKOFF:
+    //该PG状态 为非active状态
     if (!is_active()) {
       dout(20) << " peered, not active, waiting for active on "
                << *op->get_req() << dendl;
@@ -1920,11 +1930,13 @@ void PrimaryLogPG::do_request(
     switch (msg_type) {
     case CEPH_MSG_OSD_OP:
       // verify client features
+      //如果是cache pool ，操作没有带CEPH_FEATURE_OSD_CACHEPOOL的feature标志，返回错误信息
       if ((pool.info.has_tiers() || pool.info.is_tier()) &&
 	  !op->has_feature(CEPH_FEATURE_OSD_CACHEPOOL)) {
 	osd->reply_op_error(op, -EOPNOTSUPP);
 	return;
       }
+      //调用do_op 处理
       do_op(op);
       break;
     case CEPH_MSG_OSD_BACKOFF:
@@ -1979,6 +1991,8 @@ void PrimaryLogPG::do_request(
  * pg lock will be held (if multithreaded)
  * osd_lock NOT held.
  */
+//主要功能是解析出操作来，然后对操作的个中参数进行检查，检查相关对象的状态，以及该对象的head、snap、clone对象的状态等，
+//并调用函数获取对象的上下文、操作的上下文（ObjectContext、OPContext）
 void PrimaryLogPG::do_op(OpRequestRef& op)
 {
   FUNCTRACE(cct);
@@ -1986,6 +2000,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
   // change anything that will break other reads on m (operator<<).
   MOSDOp *m = static_cast<MOSDOp*>(op->get_nonconst_req());
   ceph_assert(m->get_type() == CEPH_MSG_OSD_OP);
+  ////解析字段，从bufferlist解析数据
   if (m->finish_decode()) {
     op->reset_desc();   // for TrackedOp
     m->clear_payload();
@@ -2041,12 +2056,14 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
       op->may_read() &&
       !(op->may_write() || op->may_cache())) {
     // balanced reads; any replica will do
+    //平衡读，则主从OSD都可以读取
     if (!(is_primary() || is_nonprimary())) {
       osd->handle_misdirected_op(this, op);
       return;
     }
   } else {
     // normal case; must be primary
+    //否则只能读取主OSD
     if (!is_primary()) {
       osd->handle_misdirected_op(this, op);
       return;
@@ -2062,11 +2079,13 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     return;
   }
 
+  //op中包含includes_pg_op该操作，则调用 do_pg_op(op)处理
   if (op->includes_pg_op()) {
     return do_pg_op(op);
   }
 
   // object name too long?
+  //检查名字是否太长
   if (m->get_oid().name.size() > cct->_conf->osd_max_object_name_len) {
     dout(4) << "do_op name is longer than "
 	    << cct->_conf->osd_max_object_name_len
@@ -2102,6 +2121,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
   }
 
   // blocklisted?
+  //发送请求的客户端是黑名单中的一个
   if (get_osdmap()->is_blocklisted(m->get_source_addr())) {
     dout(10) << "do_op " << m->get_source_addr() << " is blocklisted" << dendl;
     osd->reply_op_error(op, -EBLOCKLISTED);
@@ -2181,6 +2201,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
 
 
   // missing object?
+  //head对象是否处于缺失状态
   if (is_unreadable_object(head)) {
     if (!is_primary()) {
       osd->reply_op_error(op, -EAGAIN);
@@ -2193,11 +2214,13 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
       add_backoff(session, head, head);
       maybe_kick_recovery(head);
     } else {
+      //加入队列，等待恢复完成
       wait_for_unreadable_object(head, op);
     }
     return;
   }
 
+  //顺序写 且head对象正在恢复状态
   if (write_ordered) {
     // degraded object?
     if (is_degraded_or_backfilling_object(head)) {
@@ -2205,11 +2228,13 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
         add_backoff(session, head, head);
         maybe_kick_recovery(head);
       } else {
+        //加入队列，等待
         wait_for_degraded_object(head, op);
       }
       return;
     }
 
+    //顺序写，切处于数据一致性检查 scrub时期
     if (m_scrubber->is_scrub_active() && m_scrubber->write_blocked_by_scrub(head)) {
       dout(20) << __func__ << ": waiting for scrub" << dendl;
       waiting_for_scrub.push_back(op);
@@ -2321,6 +2346,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
              << dendl;
   }
 
+  //调用find_object_context获取object_context
   int r = find_object_context(
     oid, &obc, can_create,
     m->has_flag(CEPH_OSD_FLAG_MAP_SNAP_CLONE),
@@ -2504,6 +2530,7 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
 
   op->mark_started();
 
+  //调用该函数，执行相关操作
   execute_ctx(ctx);
   utime_t prepare_latency = ceph_clock_now();
   prepare_latency -= op->get_dequeued_time();

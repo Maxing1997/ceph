@@ -147,6 +147,7 @@ public:
                                  {}, 0, parent_trace);
   }
 
+  // 起始分发层， 异步完成对象， 镜像偏移范围，数据区域类型，数据缓冲区
   template <typename ImageCtxT = ImageCtx>
   static ImageDispatchSpec* create_write(
       ImageCtxT &image_ctx, ImageDispatchLayer image_dispatch_layer,

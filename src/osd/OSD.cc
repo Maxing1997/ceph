@@ -7512,15 +7512,18 @@ void OSDService::maybe_share_map(
   send_incremental_map(send_from, con, osdmap);
 }
 
+//主要工作是循环处理队列waiting_on_map中的元素，对比OSDmap，以及获取他们的pgid，最后调用enqueue_op处理。
 void OSD::dispatch_session_waiting(const ceph::ref_t<Session>& session, OSDMapRef osdmap)
 {
   ceph_assert(ceph_mutex_is_locked(session->session_dispatch_lock));
 
   auto i = session->waiting_on_map.begin();
+  //循环处理waiting_on_map中的元素
   while (i != session->waiting_on_map.end()) {
     OpRequestRef op = &(*i);
     ceph_assert(ms_can_fast_dispatch(op->get_req()));
     auto m = op->get_req<MOSDFastDispatchOp>();
+    //osdmap版本不对应
     if (m->get_min_epoch() > osdmap->get_epoch()) {
       break;
     }
@@ -7531,12 +7534,14 @@ void OSD::dispatch_session_waiting(const ceph::ref_t<Session>& session, OSDMapRe
     if (m->get_type() == CEPH_MSG_OSD_OP) {
       pg_t actual_pgid = osdmap->raw_pg_to_pg(
 	static_cast<const MOSDOp*>(m)->get_pg());
+      //获取 pgid  该PG的主OSD
       if (!osdmap->get_primary_shard(actual_pgid, &pgid)) {
 	continue;
       }
     } else {
       pgid = m->get_spg();
     }
+    //获取成功则调用enqueue_op处理
     enqueue_op(pgid, std::move(op), m->get_map_epoch());
   }
 
@@ -7547,9 +7552,12 @@ void OSD::dispatch_session_waiting(const ceph::ref_t<Session>& session, OSDMapRe
   }
 }
 
+//接收消息Message的入口函数，他被网络模块的接收线程调用。主要工作是 检查service服务 、把Message封装为OpRequest类型、
+//获取session、获取最新的OSdMap，最后dispatch_session_waiting，进入下一步。
 void OSD::ms_fast_dispatch(Message *m)
 {
   FUNCTRACE(cct);
+  //检查service，如果停止了直接返回
   if (service.is_stopping()) {
     m->put();
     return;
@@ -7596,6 +7604,7 @@ void OSD::ms_fast_dispatch(Message *m)
     }
   }
 
+  //把Message封装为OpRequest类型
   OpRequestRef op = op_tracker.create_request<OpRequest, Message*>(m);
   {
 #ifdef WITH_LTTNG
@@ -7624,6 +7633,7 @@ void OSD::ms_fast_dispatch(Message *m)
   if (m->get_connection()->has_features(CEPH_FEATUREMASK_RESEND_ON_SPLIT) ||
       m->get_type() != CEPH_MSG_OSD_OP) {
     // queue it directly
+    //直接调用enqueue_op处理
     enqueue_op(
       static_cast<MOSDFastDispatchOp*>(m)->get_spg(),
       std::move(op),
@@ -7633,11 +7643,15 @@ void OSD::ms_fast_dispatch(Message *m)
     // message that didn't have an explicit spg_t); we need to map
     // them to an spg_t while preserving delivery order.
     auto priv = m->get_connection()->get_priv();
+    //获取 session 其中包含了一个Connection的相关信息
     if (auto session = static_cast<Session*>(priv.get()); session) {
       std::lock_guard l{session->session_dispatch_lock};
       op->get();
+      //将请求加如waiting_on_map的列表里
       session->waiting_on_map.push_back(*op);
+      //获取最新的OSDMAP
       OSDMapRef nextmap = service.get_nextmap_reserved();
+      //该函数中 循环处理请求
       dispatch_session_waiting(session, nextmap);
       service.release_map(nextmap);
     }
@@ -9731,6 +9745,7 @@ bool OSD::op_is_discardable(const MOSDOp *op)
   return false;
 }
 
+//将请求加入到op_shardedwq队列中
 void OSD::enqueue_op(spg_t pg, OpRequestRef&& op, epoch_t epoch)
 {
   const utime_t stamp = op->get_req()->get_recv_stamp();
@@ -9761,6 +9776,7 @@ void OSD::enqueue_op(spg_t pg, OpRequestRef&& op, epoch_t epoch)
 
   op->mark_queued_for_pg();
   logger->tinc(l_osd_op_before_queue_op_lat, latency);
+  //加入op_shardedwq队列中
   if (PGRecoveryMsg::is_recovery_msg(op)) {
     op_shardedwq.queue(
       OpSchedulerItem(
@@ -9790,6 +9806,7 @@ void OSD::enqueue_peering_evt(spg_t pgid, PGPeeringEventRef evt)
 /*
  * NOTE: dequeue called in worker thread, with pg lock
  */
+//调用函数进行osdmap的更新，调用do_request进入PG处理流程
 void OSD::dequeue_op(
   PGRef pg, OpRequestRef op,
   ThreadPool::TPHandle &handle)
@@ -9812,16 +9829,19 @@ void OSD::dequeue_op(
 
   logger->tinc(l_osd_op_before_dequeue_op_lat, latency);
 
+  //调用该函数进行 osdmap的更新
   service.maybe_share_map(m->get_connection().get(),
 			  pg->get_osdmap(),
 			  op->sent_epoch);
 
+  //正在删除、直接返回
   if (pg->is_deleting())
     return;
 
   op->mark_reached_pg();
   op->osd_trace.event("dequeue_op");
 
+  //调用pg的do_request处理
   pg->do_request(op, handle);
 
   // finish

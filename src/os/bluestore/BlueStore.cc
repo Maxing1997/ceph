@@ -15376,6 +15376,7 @@ bool BlueStore::_eliminate_outdated_deferred(bluestore_deferred_transaction_t* d
 // ---------------------------
 // transactions
 
+//bluestore写操作分为大写和小写，写操作经过层层处理后最终被传递到BlueStore::queue_transactions函数中
 int BlueStore::queue_transactions(
   CollectionHandle& ch,
   vector<Transaction>& tls,
@@ -17073,6 +17074,8 @@ void BlueStore::_wctx_finish(
   }
 }
 
+//queue_transaction中经过层层调用，最终会调用_do_write_data来分别处理大写和小写，如下：
+//其中offset和length分别是要写的数据在对象内的逻辑偏移和长度。
 void BlueStore::_do_write_data(
   TransContext *txc,
   CollectionRef& c,
